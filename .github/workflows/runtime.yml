@@ -1,0 +1,45 @@
+name: Runtime check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  engines:
+    name: only a shared memory reaches another agent, and it shows
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup toolchain install nightly --profile minimal --target wasm32-unknown-unknown --component rust-src
+      - name: Build the probe without and with shared memory
+        run: |
+          cargo +stable build --release -p probe-buffer --target wasm32-unknown-unknown --target-dir target/buffer-plain
+          RUSTFLAGS="-Ctarget-feature=+atomics,+bulk-memory -Clink-arg=--shared-memory -Clink-arg=--import-memory \
+            -Clink-arg=--max-memory=1073741824 -Clink-arg=--export=__wasm_init_tls -Clink-arg=--export=__tls_size \
+            -Clink-arg=--export=__tls_align -Clink-arg=--export=__tls_base -Clink-arg=--export=__heap_base" \
+            cargo +nightly build --release -p probe-buffer --target wasm32-unknown-unknown --target-dir target/buffer-shared \
+            -Zbuild-std=panic_abort,std
+      - name: Generate the wasm-bindgen glue
+        run: |
+          version=$(cargo +stable pkgid -p wasm-bindgen | sed 's/.*@//')
+          curl -sSfL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$version/wasm-bindgen-$version-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz --strip-components=1 -C "$RUNNER_TEMP" "wasm-bindgen-$version-x86_64-unknown-linux-musl/wasm-bindgen"
+          for kind in plain shared; do
+            "$RUNNER_TEMP/wasm-bindgen" --target web --out-dir target/pkg-$kind \
+              target/buffer-$kind/wasm32-unknown-unknown/release/probe_buffer.wasm
+          done
+      - run: node harness/node.mjs
+      - run: npm install && npx playwright install --with-deps chromium firefox webkit
+      - run: node harness/browsers.mjs

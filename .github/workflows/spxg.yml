@@ -1,0 +1,50 @@
+name: Spxg's claim
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  memvfs-link:
+    name: memvfs refused shared memory (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta, nightly, "1.82"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --target wasm32-unknown-unknown
+      - run: >-
+          python3 harness/proof.py ${{ matrix.toolchain }} link
+          memvfs-unshared memvfs-lto-false memvfs-lto-thin memvfs-lto-fat
+          memvfs-c-atomics-lto-false memvfs-c-atomics-lto-thin memvfs-c-atomics-lto-fat
+          memvfs-extra-features-lto-false memvfs-extra-features-lto-thin memvfs-extra-features-lto-fat
+          memvfs-no-check-features
+
+  forced-race:
+    name: forcing past the linker breaks safe std (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta, nightly, "1.82"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --target wasm32-unknown-unknown
+      - run: python3 harness/proof.py ${{ matrix.toolchain }} asm
+      - run: python3 harness/proof.py ${{ matrix.toolchain }} link race-no-check-features
+      - run: node harness/race.mjs target/proof/${{ matrix.toolchain }}/race-no-check-features.wasm --atomic lossy --cfg-atomics false

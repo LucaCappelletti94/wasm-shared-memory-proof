@@ -1,0 +1,45 @@
+name: "#219's cfg gate"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  cfg:
+    name: cfg sees atomics only on nightly (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta, nightly, "1.82"]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --target wasm32-unknown-unknown,wasm32-wasip1-threads
+      - run: python3 harness/proof.py ${{ matrix.toolchain }} cfg
+
+  atomics-lto:
+    name: +atomics with LTO links into shared memory (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta, nightly, "1.82"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --target wasm32-unknown-unknown
+      - run: python3 harness/proof.py ${{ matrix.toolchain }} link race-atomics-lto-false race-atomics-lto-thin race-atomics-lto-fat
+      - run: |
+          for lto in thin fat; do
+            node harness/race.mjs target/proof/${{ matrix.toolchain }}/race-atomics-lto-$lto.wasm \
+              --atomic exact --cfg-atomics ${{ matrix.toolchain == 'nightly' }}
+          done
