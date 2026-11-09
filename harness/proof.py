@@ -31,7 +31,7 @@ NO_BULK_MEMORY = "'bulk-memory' feature must be used in order to use shared memo
 
 @dataclass(frozen=True)
 class Case:
-    """A probe, the way it is built and linked, and the linker errors expected, none meaning it links."""
+    """A probe, the way it is built and linked, the linker errors expected (none meaning it links) and what its run() returns."""
 
     probe: str
     lto: str
@@ -39,7 +39,9 @@ class Case:
     rustflags: tuple = ()
     link_args: tuple = ()
     cflags: str = ""
+    features: tuple = ()
     shared: bool = True
+    returns: int | None = None
 
 
 def memvfs(lto, refused, **options):
@@ -50,26 +52,37 @@ def race(lto, refused, **options):
     return Case("probe-race", lto, refused, **options)
 
 
+EXTRA_FEATURES = "--extra-features=atomics,bulk-memory"
+
+# Instantiates a module, handing every memory import a fresh shared memory, and prints run().
+RUN_SCRIPT = """
+const module = new WebAssembly.Module(require("node:fs").readFileSync(process.argv[1]));
+const imports = {};
+for (const { module: from, name, kind } of WebAssembly.Module.imports(module)) {
+  if (kind !== "memory") throw new Error(`unexpected import ${from}.${name}`);
+  (imports[from] ??= {})[name] = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true });
+}
+console.log(new WebAssembly.Instance(module, imports).exports.run());
+"""
+
 CASES = {
     # Spxg's claim: memvfs, Rust built without atomics, through every route, after a control that it runs unshared.
-    "memvfs-unshared": memvfs("false", (), shared=False),
+    "memvfs-unshared": memvfs("false", (), shared=False, returns=42),
     "memvfs-lto-false": memvfs("false", (MARKED.format("<sqlite_wasm_rs>"), NO_ATOMICS)),
     "memvfs-lto-thin": memvfs("thin", (MARKED.format("<probe>"), NO_ATOMICS)),
     "memvfs-lto-fat": memvfs("fat", (MARKED.format("<probe>"), NO_ATOMICS)),
     "memvfs-c-atomics-lto-false": memvfs("false", (MARKED.format("<sqlite_wasm_rs>"),), cflags=C_ATOMICS),
     "memvfs-c-atomics-lto-thin": memvfs("thin", (MARKED.format("<probe>"),), cflags=C_ATOMICS),
     "memvfs-c-atomics-lto-fat": memvfs("fat", (MARKED.format("<probe>"),), cflags=C_ATOMICS),
-    "memvfs-extra-features-lto-false": memvfs(
-        "false", (MARKED.format("<sqlite_wasm_rs>"),), link_args=("--extra-features=atomics,bulk-memory",)
-    ),
-    "memvfs-extra-features-lto-thin": memvfs(
-        "thin", (MARKED.format("<probe>"),), link_args=("--extra-features=atomics,bulk-memory",)
-    ),
-    "memvfs-extra-features-lto-fat": memvfs(
-        "fat", (MARKED.format("<probe>"),), link_args=("--extra-features=atomics,bulk-memory",)
-    ),
+    "memvfs-extra-features-lto-false": memvfs("false", (MARKED.format("<sqlite_wasm_rs>"),), link_args=(EXTRA_FEATURES,)),
+    "memvfs-extra-features-lto-thin": memvfs("thin", (MARKED.format("<probe>"),), link_args=(EXTRA_FEATURES,)),
+    "memvfs-extra-features-lto-fat": memvfs("fat", (MARKED.format("<probe>"),), link_args=(EXTRA_FEATURES,)),
     "memvfs-no-check-features": memvfs("false", (), link_args=("--no-check-features",)),
     "race-no-check-features": race("false", (), link_args=("--no-check-features",)),
+    # Spxg's claim in general: an object with no atomics carries no mark, so supplying the feature is enough.
+    "bare-shared": Case("probe-bare", "false", (NO_ATOMICS,)),
+    "bare-extra-features": Case("probe-bare", "false", (), link_args=(EXTRA_FEATURES,), returns=42),
+    "bare-std-extra-features": Case("probe-bare", "false", (MARKED.format("<std>"),), link_args=(EXTRA_FEATURES,), features=("std",)),
     # The cfg gate: +atomics on toolchains whose shipped std has none.
     "race-atomics-lto-false": race("false", (MARKED.format("<std>"),), rustflags=(ATOMICS,)),
     "race-atomics-lto-thin": race("thin", (), rustflags=(ATOMICS,)),
@@ -83,7 +96,7 @@ def run(command, env=None):
     return done.returncode, done.stdout + done.stderr
 
 
-def cargo(toolchain, verb, package, target_dir, rustflags=(), lto="false", cflags="", target=TARGET):
+def cargo(toolchain, verb, package, target_dir, rustflags=(), lto="false", cflags="", target=TARGET, features=()):
     env = dict(os.environ)
     env.pop("RUSTFLAGS", None)
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(rustflags)
@@ -94,6 +107,8 @@ def cargo(toolchain, verb, package, target_dir, rustflags=(), lto="false", cflag
     else:
         env.pop("CFLAGS_wasm32_unknown_unknown", None)
     command = ["cargo", f"+{toolchain}", verb, "--release", "-p", package, "--target", target]
+    if features:
+        command += ["--features", ",".join(features)]
     return run(command, env)
 
 
@@ -133,7 +148,9 @@ def link(toolchain, names):
         link_args = (*SHARED, *case.link_args) if case.shared else case.link_args
         rustflags = (*case.rustflags, *(f"-Clink-arg={arg}" for arg in link_args))
         target_dir = ROOT / "target" / f"link-{toolchain}"
-        code, output = cargo(toolchain, "build", case.probe, target_dir, rustflags, case.lto, case.cflags)
+        code, output = cargo(
+            toolchain, "build", case.probe, target_dir, rustflags, case.lto, case.cflags, features=case.features
+        )
         errors = linker_errors(output)
         module = target_dir / TARGET / "release" / f"{case.probe.replace('-', '_')}.wasm"
         if refused:
@@ -147,13 +164,11 @@ def link(toolchain, names):
         flags = wasmfile.memory_limits_flags(module.read_bytes())
         expect(flags is not None and bool(flags & 2) == case.shared, f"{name}: memory limits flags {flags}")
         shutil.copyfile(module, out / f"{name}.wasm")
-        if case.shared:
-            print(f"ok {name}: links, memory shared")
-        else:
-            script = "const fs = require('node:fs'); console.log(new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(process.argv[1])), {}).exports.run())"
-            result = run(["node", "-e", script, str(module)])[1].strip()
-            expect(result == "42", f"{name}: run() returned {result}")
-            print(f"ok {name}: links unshared, memvfs reads back 42")
+        print(f"ok {name}: links, memory {'shared' if case.shared else 'not shared'}")
+        if case.returns is not None:
+            result = run(["node", "-e", RUN_SCRIPT, str(module)])[1].strip()
+            expect(result == str(case.returns), f"{name}: run() returned {result}")
+            print(f"ok {name}: run() returns {result}")
 
 
 def marks(toolchain, target_dir):

@@ -32,6 +32,21 @@ jobs:
           memvfs-extra-features-lto-false memvfs-extra-features-lto-thin memvfs-extra-features-lto-fat
           memvfs-no-check-features
 
+  atomics-free-link:
+    name: an atomics-free no_std module links with --extra-features (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta, nightly, "1.82"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --target wasm32-unknown-unknown
+      - run: python3 harness/proof.py ${{ matrix.toolchain }} link bare-shared bare-extra-features bare-std-extra-features
+
   forced-race:
     name: forcing past the linker breaks safe std (${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
