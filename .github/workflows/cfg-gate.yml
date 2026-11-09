@@ -2,6 +2,7 @@ name: "#219's cfg gate"
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
   schedule:

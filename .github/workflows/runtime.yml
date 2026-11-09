@@ -2,6 +2,7 @@ name: Runtime check
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
   schedule:
