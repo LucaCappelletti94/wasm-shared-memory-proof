@@ -22,7 +22,8 @@ try { instance.exports[bump](${TIMES}); parentPort.postMessage("ok"); }
 catch (error) { parentPort.postMessage(error.name); }`;
 
 async function race(bump) {
-  const memory = new WebAssembly.Memory({ initial: 17, maximum: 16384, shared: true });
+  // 16 MiB clears the probe's declared minimum, 1 GiB matches its --max-memory.
+  const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true });
   const main = new WebAssembly.Instance(module, { env: { memory } });
   main.exports.record_panics();
   const gate = new Int32Array(new SharedArrayBuffer(8));
